@@ -1,23 +1,16 @@
 @echo off
 setlocal
-
-REM Ir a la carpeta del script
-cd /d "%~dp0"
-
-REM Activar venv si no está
-if not exist venv (
-  py -m venv venv
+cd /d "%~dp0"      rem -> estás en ...\ECOBOT\ecobot
+if exist ..\venv\Scripts\activate (
+  call ..\venv\Scripts\activate
+) else (
+  py -m venv ..\venv
+  call ..\venv\Scripts\activate
 )
-
-call venv\Scripts\activate
-
-REM Dependencias mínimas
-pip install --quiet rich pytest
-
+pip install -r requirements.txt -q
 echo.
 echo ====== Lanzando EcoBot (consola) ======
 echo.
-
 py -m app.server
-
 endlocal
+
