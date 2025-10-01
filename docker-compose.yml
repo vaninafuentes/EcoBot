@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    container_name: ecobot-api
+    command: uvicorn app.server_api:app --host 0.0.0.0 --port 8000 --workers 2
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    # Montamos solo la carpeta de salidas para ver los PNG en el host
+    volumes:
+      - ./out:/app/out
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecobot-redis
+    ports:
+      - "6379:6379"

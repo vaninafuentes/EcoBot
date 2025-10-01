@@ -201,5 +201,6 @@ def route_question(question: str, history=None) -> str:
             "• Definición: La demanda es la cantidad que los consumidores desean comprar a cada precio; "
             "la oferta, la cantidad que los productores desean vender.\n"
             "• Mini-check: ¿Querés que lo bajemos a un numerito rápido?\n"
-            f"(Detalle técnico: {e})"
-        )
+            f"(Detalle técnico: {e})")
+
+        
