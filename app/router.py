@@ -10,6 +10,7 @@ from app.services.plots import (
     plot_demand_curve,
     plot_supply_curve,
 )
+from typing import List, Dict, Any, Optional
 
 # ----------------------------
 # Helpers: números / parseo
