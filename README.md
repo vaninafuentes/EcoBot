@@ -1,74 +1,59 @@
-📘 EcoBot — Chatbot Económico Multi-Sesión (Servidor Socket + Groq)
+🧠 EcoBot — Chatbot Económico Multi-Sesión (Servidor TCP + Groq)
 
-EcoBot es un chatbot especializado en responder preguntas de economía, potenciando modelos LLM de Groq.
-Funciona como un servidor TCP multi-usuario donde cada conexión representa una sesión independiente, con historial propio y administración en tiempo real.
+EcoBot es un chatbot especializado en economía que funciona como un servidor TCP multiusuario, donde cada conexión representa una sesión independiente con su propio historial.
+Todas las respuestas se generan mediante un router económico y modelos LLM de Groq.
 
-🚀 Características principales
-🧠 Multi-sesión real
+✨ Características Principales
 
-Cada conexión TCP crea una sesión independiente.
+🔌 Servidor TCP Multi-Sesión
+Cada conexión crea su propia sesión con historial aislado.
 
-Memoria por conversación en el servidor.
+🧠 Respuestas inteligentes
+Conocimiento económico + cálculos + llamadas a LLM.
 
-Manejo concurrente utilizando threads.
+🧰 Consola Administrativa Interna
 
-Identificador humano: Sesión 1, Sesión 2, etc.
+list → lista sesiones activas
 
-Identificador técnico: session_id corto (ej. 91ab27ef).
+kill <session_id> → cierra una sesión
 
-💬 Conversación inteligente
+exit → cierra la consola admin sin apagar el servidor
 
-EcoBot puede:
+🧵 Concurrencia por hilos
+Cada cliente se maneja en su propio thread.
 
-Responder preguntas teóricas de economía.
+📜 Historial por sesión
+Memoria en RAM, aislada entre usuarios.
 
-Realizar cálculos sencillos.
-
-Generar interpretaciones basadas en conocimiento incluido en el router.
-
-Consultar modelos LLM de Groq para consultas complejas.
-
-🧰 Consola Administrativa integrada
-
-Incluye una consola interactiva para gestionar sesiones activas:
-
-list                → ver todas las sesiones activas
-kill <session_id>   → cerrar una sesión específica
-exit                → cerrar la consola admin (el servidor sigue corriendo)
-
-🔌 Cliente TCP simple
-
-Se incluye un cliente para pruebas desde consola.
-
-📦 Estructura del Proyecto
+📁 Estructura del Proyecto
 EcoBot/
 │
 ├── app/
-│   ├── server_socket.py     # Servidor TCP multi-sesión
-│   ├── socket_client.py     # Cliente TCP de prueba
-│   ├── router.py            # Lógica de enrutamiento y llamadas a Groq
-│   ├── ...
+│   ├── server_socket.py     # Servidor TCP multi-usuario
+│   ├── socket_client.py     # Cliente para pruebas
+│   ├── router.py            # Router económico + Groq
+│   └── ...
 │
 ├── requirements.txt
 └── README.md
 
-⚙️ Requisitos Previos
-Python 3.10+
-Instalar dependencias
+⚙️ Requisitos
+🐍 Python 3.10 o superior
+📦 Instalar dependencias
 pip install -r requirements.txt
 
-Variables de entorno
-GROQ_API_KEY="tu_api_key_aquí"
+🔑 Variables de entorno necesarias
+GROQ_API_KEY="TU_API_KEY"
 ECOBOT_SOCKET_PORT=5001
 
-🟦 Cómo ejecutar el Servidor Socket
+🚀 Ejecutar el Servidor Socket
 
-Desde la carpeta raíz del proyecto:
+Desde la raíz del proyecto:
 
 python -m app.server_socket
 
 
-Verás algo como:
+Salida esperada:
 
 EcoBot socket server escuchando en 0.0.0.0:5001 ...
 Consola admin lista. Comandos: list, kill <session_id>, exit
@@ -79,25 +64,25 @@ Cuando un cliente se conecta:
 
 [Sesión 1] Nueva conexión desde ('127.0.0.1', 53294) (sid=91ab27ef)
 
-🛠️ Comandos de la Consola Admin
+🛠 Consola Administrativa
 
-Usás la misma terminal donde corre el servidor.
+La consola admin está integrada en el mismo proceso del servidor.
 
-Ver sesiones activas:
+📄 Listar sesiones activas
 (admin)> list
 Sesión 1 (91ab27ef) | ('127.0.0.1', 53294) | hilo=handle_client | started=... | last_seen=...
 
-Cerrar una sesión:
+❌ Cerrar una sesión
 (admin)> kill 91ab27ef
 Sesión 91ab27ef cerrada desde admin.
 
-Salir de la consola admin:
+🚪 Salir de la consola admin
 (admin)> exit
 
 
-El servidor continúa corriendo en segundo plano.
+(El servidor sigue funcionando aunque cierres la consola admin.)
 
-🟩 Cliente TCP de Prueba
+🟩 Cliente TCP de prueba
 
 En otra terminal:
 
@@ -114,35 +99,38 @@ Escribí tu pregunta de economía o 'salir' para desconectarte.
 EcoBot: El Producto Bruto Interno es...
 
 🧱 Cómo funciona internamente
-1. Cada cliente crea una nueva sesión
-
-Con:
-
+🔢 1. Se genera una sesión por conexión
 session_id = uuid.uuid4().hex[:8]
 session_number = next(SESSION_SEQ)
 
-2. Se registra la sesión activa
-active_connections[session_id] = {
-    "addr": ("127.0.0.1", 53294),
-    "thread": "handle_client",
-    "started_at": "...",
-    "last_seen": "...",
-    "number": 1,
-    "conn": <socket>
+📌 2. Se guarda en active_connections
+{
+  "addr": ("127.0.0.1", 53294),
+  "thread": "handle_client",
+  "started_at": "...",
+  "last_seen": "...",
+  "number": 1,
+  "conn": <socket>
 }
 
-3. Historial de conversación independiente
+📝 3. Historial por sesión
 SESSION_HISTORIES[session_id] = [
     {"role": "user", "content": "..."},
     {"role": "assistant", "content": "..."}
 ]
 
-4. Manejo concurrente
+🧵 4. Cada conexión corre en un hilo independiente
 
-Cada conexión se maneja en su propio thread, protegido por locks para evitar condiciones de carrera. 🧹 Notas importantes
+Protegido con locks para evitar condiciones de carrera. 🧹 Consideraciones
 
-El historial se guarda en memoria RAM; se borra al reiniciar el servidor.
+El historial se guarda solo en memoria RAM (se pierde al reiniciar).
 
-El servidor puede manejar múltiples usuarios concurrentes.
+Ideal para entornos controlados, usos académicos o bots personales.
 
-Para miles de usuarios o persistencia, debería agregarse almacenamiento externo (no incluido).
+Para muchos usuarios simultáneos, puede ampliarse con:
+
+Persistencia externa
+
+Multiproceso o asyncio
+
+Logs estructurados
