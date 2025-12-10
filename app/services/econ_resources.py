@@ -1,35 +1,86 @@
 # app/services/econ_resources.py
 """
-Base de conocimiento (KB) para EcoBot:
-- Microeconomía, Macroeconomía y Cálculo Financiero.
-- Cada entrada puede tener: definicion (obligatoria), intuicion (opcional), mini_check (opcional), formula (opcional).
-- answer_from_kb(q) devuelve un dict con las claves presentes o None si no encuentra.
+Base de conocimiento (KB) para EcoBot.
+
+Contiene conceptos de:
+- Microeconomía
+- Macroeconomía
+- Cálculo financiero
+
+Cada entrada puede tener:
+- "keywords"   (lista de palabras clave que activan la entrada)
+- "definicion" (obligatoria)
+- "intuicion"  (opcional)
+- "mini_check" (opcional)
+- "formula"    (opcional)
+
+La función principal `answer_from_kb(question)` busca en la base
+y devuelve un dict solo con los campos presentes, o None si no hay match.
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 import unicodedata
 
-# -----------------------
-# Utils de normalización
-# -----------------------
-def _normalize(s: str) -> str:
-    if not s:
-        return ""
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))  # quita acentos
-    return s.lower().strip()
 
-def _match_keywords(keywords: List[str], query: str) -> bool:
-    nq = _normalize(query)
-    for kw in keywords:
-        if _normalize(kw) in nq:
-            return True
+# -----------------------
+# Utilidades de texto
+# -----------------------
+
+def _normalize_text(text: str) -> str:
+    """
+    Normaliza texto para comparación:
+      - Maneja None / cadena vacía.
+      - Quita acentos.
+      - Pasa a minúsculas y recorta espacios.
+    """
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKD", text)
+    # Quita caracteres de acento (tildes, etc.)
+    without_accents = "".join(
+        ch for ch in normalized if not unicodedata.combining(ch)
+    )
+    return without_accents.lower().strip()
+
+
+def _matches_any_keyword(keywords: List[str], query: str) -> bool:
+    """
+    Devuelve True si la consulta coincide con al menos una palabra clave.
+
+    Reglas:
+    - Keywords cortas (<= 3 caracteres) sólo matchean si aparecen como
+      palabra completa (token) en la consulta. Esto evita falsos
+      positivos del estilo "ac" dentro de "inflacion" o "hacer".
+    - Keywords más largas pueden matchear como subcadena normal.
+    """
+    normalized_query = _normalize_text(query)
+    if not normalized_query:
+        return False
+
+    query_tokens = normalized_query.split()
+
+    for keyword in keywords:
+        normalized_keyword = _normalize_text(keyword)
+        if not normalized_keyword:
+            continue
+
+        # Keywords muy cortas: solo matchean como token completo
+        if len(normalized_keyword) <= 3:
+            if normalized_keyword in query_tokens:
+                return True
+        else:
+            # Palabras más largas: permitimos substring
+            if normalized_keyword in normalized_query:
+                return True
+
     return False
 
+
 # -----------------------
-# KB: Micro + Macro + CF
+# Base de conocimiento
 # -----------------------
-KB = [
+
+ECONOMY_KNOWLEDGE_BASE: List[Dict[str, str]] = [
     # ========== MICROECONOMÍA ==========
     {
         "keywords": ["demanda", "curva de demanda"],
@@ -102,12 +153,12 @@ KB = [
         "definicion": "Costo que varía con el nivel de producción.",
     },
     {
-        "keywords": ["costo total", "ct"],
+        "keywords": ["costo total"],
         "definicion": "Suma de costos fijos y variables para cada nivel de producción.",
         "formula": "CT(Q) = CF + CV(Q)"
     },
     {
-        "keywords": ["costo medio", "costo promedio", "cme", "ac"],
+        "keywords": ["costo medio", "costo promedio", "cme"],
         "definicion": "Costo total dividido por la cantidad producida.",
         "formula": "CMe(Q) = CT(Q) / Q"
     },
@@ -188,11 +239,11 @@ KB = [
         "intuicion": "Puede ser friccional, estructural o cíclico.",
     },
     {
-        "keywords": ["oferta agregada", "oa"],
+        "keywords": ["oferta agregada"],
         "definicion": "Relación entre el nivel de precios y la cantidad total ofrecida de bienes y servicios.",
     },
     {
-        "keywords": ["demanda agregada", "da"],
+        "keywords": ["demanda agregada"],
         "definicion": "Relación entre el nivel de precios y la cantidad total demandada de bienes y servicios.",
     },
     {
@@ -210,7 +261,7 @@ KB = [
         "definicion": "Registro contable de todas las transacciones económicas de un país con el exterior.",
     },
     {
-        "keywords": ["tipo de cambio", "tc", "tipo de cambio nominal"],
+        "keywords": ["tipo de cambio", "tipo de cambio nominal"],
         "definicion": "Precio de una moneda en términos de otra.",
         "intuicion": "Si sube el tipo de cambio nominal (depreciación), los bienes locales se abaratan en el exterior.",
     },
@@ -280,21 +331,38 @@ KB = [
     },
 ]
 
+
 # --------------------------------
-# API: búsqueda y respuesta de KB
+# API pública: búsqueda en la KB
 # --------------------------------
+
 def answer_from_kb(question: str) -> Optional[Dict[str, str]]:
     """
-    Busca en la KB por inclusión de palabra clave (normalizada sin acentos).
-    Devuelve solo los campos presentes (no fuerza 'intuicion' ni 'mini_check').
+    Busca una pregunta en la base de conocimiento.
+
+    - Normaliza la pregunta (sin acentos, minúsculas).
+    - Recorre todas las entradas y revisa si alguna palabra clave
+      coincide con la consulta siguiendo las reglas de `_matches_any_keyword`.
+    - Si encuentra match, devuelve un dict con:
+        {"definicion", "intuicion"?, "mini_check"?, "formula"?"}
+      Solo incluye las claves que existen en la entrada original.
+    - Si no hay ningún match, devuelve None.
     """
     if not question:
         return None
-    for entry in KB:
-        if _match_keywords(entry["keywords"], question):
-            out = {"definicion": entry["definicion"]}
-            if "intuicion" in entry: out["intuicion"] = entry["intuicion"]
-            if "mini_check" in entry: out["mini_check"] = entry["mini_check"]
-            if "formula" in entry: out["formula"] = entry["formula"]
-            return out
+
+    for entry in ECONOMY_KNOWLEDGE_BASE:
+        keywords = entry.get("keywords", [])
+        if _matches_any_keyword(keywords, question):
+            result: Dict[str, str] = {
+                "definicion": entry["definicion"]
+            }
+            if "intuicion" in entry:
+                result["intuicion"] = entry["intuicion"]
+            if "mini_check" in entry:
+                result["mini_check"] = entry["mini_check"]
+            if "formula" in entry:
+                result["formula"] = entry["formula"]
+            return result
+
     return None

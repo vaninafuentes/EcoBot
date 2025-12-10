@@ -1,5 +1,25 @@
-# ecobot/app/router.py
+# app/router.py
+"""
+Router principal de EcoBot.
+
+Dado un texto de pregunta:
+  1. Si pide un gráfico (palabra 'grafico' o 'gráfico'), llama a las funciones
+     de app.services.plots (demanda, oferta, costos, serie, etc.) y devuelve
+     un mensaje con la ruta del PNG generado + una explicación corta.
+
+  2. Si no es un gráfico, intenta responder usando la base de conocimiento
+     económica (app.services.econ_resources.answer_from_kb).
+
+  3. Si la base de conocimiento no alcanza, usa el LLM a través de
+     app.services.llm_client.chat_teacher, construyendo los mensajes con
+     app.services.didactica.build_messages.
+"""
+
+from __future__ import annotations
+
 import re
+from typing import List, Dict, Any
+
 from app.services.econ_resources import answer_from_kb
 from app.services.didactica import build_messages
 from app.services.llm_client import chat_teacher
@@ -10,154 +30,233 @@ from app.services.plots import (
     plot_demand_curve,
     plot_supply_curve,
 )
-from typing import List, Dict, Any, Optional
+
+# Parámetros por defecto del LLM (podrías moverlos a app/config.py si querés)
+DEFAULT_LLM_TEMPERATURE: float = 0.55
+DEFAULT_LLM_MAX_TOKENS: int = 380
+
 
 # ----------------------------
 # Helpers: números / parseo
 # ----------------------------
-def _is_num_token(tok: str) -> bool:
-    """Acepta enteros/decimales con . o , y signo - opcional."""
-    if not tok:
-        return False
-    t = tok.strip().replace(",", ".")
-    if t.startswith("-"):
-        t = t[1:]
-    if t.count(".") > 1:
-        return False
-    return t.replace(".", "", 1).isdigit()
 
-def _parse_floats(text: str):
-    """Extrae todos los números del texto (soporta coma o punto)."""
-    toks = re.split(r"[\s,;]+", (text or "").strip())
-    vals = []
-    for t in toks:
-        tt = t.replace(",", ".")
-        if _is_num_token(tt):
-            vals.append(float(tt))
-    return vals
+def _is_numeric_token(token: str) -> bool:
+    """
+    Devuelve True si 'token' representa un número válido.
+    Acepta:
+      - enteros
+      - decimales con . o ,
+      - signo negativo opcional.
+    """
+    if not token:
+        return False
+
+    cleaned = token.strip().replace(",", ".")  # cambiamos coma por punto
+
+    if cleaned.startswith("-"):
+        cleaned = cleaned[1:]  # quitamos el signo para analizar solo dígitos
+
+    # Más de un punto decimal → inválido
+    if cleaned.count(".") > 1:
+        return False
+
+    # Permitimos a lo sumo un punto; el resto deben ser dígitos
+    return cleaned.replace(".", "", 1).isdigit()
+
+
+def _extract_floats_from_text(text: str) -> List[float]:
+    """
+    Extrae todos los números (como float) que aparezcan en un texto.
+    Soporta separadores por espacio, coma o punto y coma.
+    """
+    tokens = re.split(r"[\s,;]+", (text or "").strip())
+    values: List[float] = []
+
+    for token in tokens:
+        normalized = token.replace(",", ".")
+        if _is_numeric_token(normalized):
+            values.append(float(normalized))
+
+    return values
+
 
 # ----------------------------
 # Formateo de KB (str o dict)
 # ----------------------------
-def _format_kb(kb) -> str:
+
+def _format_kb_entry(kb_entry: object) -> str:
     """
-    Devuelve texto con:
+    Recibe una entrada de la base de conocimiento y la convierte
+    en un texto amigable con:
       • Definición
       • Intuición (si existe)
-      • Mini-check
-    Acepta str o dict con claves comunes.
+      • Mini-check (siempre se agrega)
     """
-    if isinstance(kb, str):
-        defin = kb.strip()
-        intu  = None
-    elif isinstance(kb, dict):
-        defin = (
-            kb.get("definicion")
-            or kb.get("definición")
-            or kb.get("definition")
-            or kb.get("answer")
+    if isinstance(kb_entry, str):
+        definition = kb_entry.strip()
+        intuition = None
+    elif isinstance(kb_entry, dict):
+        # Buscamos posibles claves de "definición"
+        definition = (
+            kb_entry.get("definicion")
+            or kb_entry.get("definición")
+            or kb_entry.get("definition")
+            or kb_entry.get("answer")
             or ""
         )
-        intu = kb.get("intuicion") or kb.get("intuición") or kb.get("intuition")
+        # Distintas formas de escribir "intuición"
+        intuition = (
+            kb_entry.get("intuicion")
+            or kb_entry.get("intuición")
+            or kb_entry.get("intuition")
+        )
     else:
-        defin = str(kb)
-        intu = None
+        # fallback: lo convertimos a string sin romper
+        definition = str(kb_entry)
+        intuition = None
 
-    parts = []
-    if defin:
-        parts.append("• Definición: " + str(defin).strip())
-    if intu:
-        parts.append("• Intuición: " + str(intu).strip())
-    # vuelve el mini-check
+    parts: List[str] = []
+
+    if definition:
+        parts.append("• Definición: " + str(definition).strip())
+    if intuition:
+        parts.append("• Intuición: " + str(intuition).strip())
+
+    # Línea de mini-check estándar
     parts.append("• Mini-check: ¿Querés que lo bajemos a un numerito rápido?")
+
     return "\n".join(parts)
+
 
 # ----------------------------
 # Router principal
 # ----------------------------
-def route_question(question: str, history=None) -> str:
-    q_raw = (question or "").strip()
-    q = q_raw.lower()
+
+def route_question(
+    question: str,
+    history: List[Dict[str, Any]] | None = None,
+) -> str:
+    """
+    Dado el texto de una pregunta y (opcionalmente) el historial de la sesión,
+    decide cómo responder:
+      - gráficos → funciones de app.services.plots
+      - conceptos → base de conocimiento (econ_resources)
+      - resto → LLM (Groq) mediante chat_teacher
+    """
+    raw_question = (question or "").strip()
+    normalized_question = raw_question.lower()
 
     # ======================
     #  GRÁFICOS (con explicación)
     # ======================
-    if ("grafico" in q) or ("gráfico" in q):
+    if ("grafico" in normalized_question) or ("gráfico" in normalized_question):
         try:
-            # tolerancia básica a typos
-            pide_demanda = any(w in q for w in ("demanda", "demna", "dema", "demada"))
-            pide_oferta  = any(w in q for w in ("oferta", "ofrta", "ofe"))
-            pide_costos  = any(w in q for w in ("costo", "costos", "coste", "costes"))
-            pide_serie   = "serie" in q
+            # Tolerancia básica a typos
+            wants_demand_graph = any(
+                word in normalized_question
+                for word in ("demanda", "demna", "dema", "demada")
+            )
+            wants_supply_graph = any(
+                word in normalized_question
+                for word in ("oferta", "ofrta", "ofe")
+            )
+            wants_cost_graph = any(
+                word in normalized_question
+                for word in ("costo", "costos", "coste", "costes")
+            )
+            wants_series_graph = "serie" in normalized_question
 
-            nums = _parse_floats(q)
+            numeric_values = _extract_floats_from_text(normalized_question)
 
-            # Serie: "grafico serie 10,12,11,15"
-            if pide_serie:
+            # ----- Serie: "grafico serie 10,12,11,15"
+            if wants_series_graph:
                 # Tomar números después de la palabra "serie" si existen
-                if "serie" in q:
-                    after = q.split("serie", 1)[1]
-                    vals = _parse_floats(after)
-                else:
-                    vals = nums
-                if len(vals) < 2:
+                after_serie = normalized_question.split("serie", 1)[1]
+                series_values = _extract_floats_from_text(after_serie)
+
+                # Si no encontramos nada específico después de "serie",
+                # usamos todos los números que haya en el texto.
+                if len(series_values) < 2:
+                    series_values = numeric_values
+
+                if len(series_values) < 2:
                     return "Decime valores así: `grafico serie 10,12,11,15`"
-                path = plot_series(vals, title="Serie", ylabel="", xlabel="Índice")
+
+                image_path = plot_series(
+                    series_values,
+                    title="Serie",
+                    ylabel="",
+                    xlabel="Índice",
+                )
                 return (
-                    f"✅ Gráfico de SERIE guardado en:\n{path}\n\n"
+                    f"✅ Gráfico de SERIE guardado en:\n{image_path}\n\n"
                     "📘 Explicación: El gráfico de serie muestra la evolución de tus valores en orden. "
                     "Sirve para ver subas, bajas y tendencias simples."
                 )
 
-            # Costos
-            if pide_costos:
-                path = plot_cost_curves()
+            # ----- Costos
+            if wants_cost_graph:
+                image_path = plot_cost_curves()
                 return (
-                    f"✅ Gráfico de COSTOS guardado en:\n{path}\n\n"
+                    f"✅ Gráfico de COSTOS guardado en:\n{image_path}\n\n"
                     "📘 Explicación: Se muestran curvas típicas (Costo Medio y Costo Marginal). "
                     "En muchos casos el CMg corta al CMe en su punto mínimo."
                 )
 
-            # Oferta y demanda juntos
-            if pide_demanda and pide_oferta:
+            # ----- Oferta y demanda juntos
+            if wants_demand_graph and wants_supply_graph:
                 # Parámetros opcionales: a_d, b_d, a_s, b_s
-                if len(nums) >= 4:
-                    path = plot_supply_demand(nums[0], nums[1], nums[2], nums[3])
+                if len(numeric_values) >= 4:
+                    image_path = plot_supply_demand(
+                        numeric_values[0],
+                        numeric_values[1],
+                        numeric_values[2],
+                        numeric_values[3],
+                    )
                 else:
-                    path = plot_supply_demand()
+                    image_path = plot_supply_demand()
+
                 return (
-                    f"✅ Gráfico de OFERTA Y DEMANDA guardado en:\n{path}\n\n"
+                    f"✅ Gráfico de OFERTA Y DEMANDA guardado en:\n{image_path}\n\n"
                     "📘 Explicación: El punto donde se cruzan oferta y demanda es el equilibrio de mercado. "
                     "Allí, la cantidad demandada coincide con la ofrecida al precio de equilibrio."
                 )
 
-            # Demanda sola
-            if pide_demanda and not pide_oferta:
+            # ----- Demanda sola
+            if wants_demand_graph and not wants_supply_graph:
                 # Parámetros opcionales: a_d, b_d
-                if len(nums) >= 2:
-                    path = plot_demand_curve(nums[0], nums[1])
+                if len(numeric_values) >= 2:
+                    image_path = plot_demand_curve(
+                        numeric_values[0],
+                        numeric_values[1],
+                    )
                 else:
-                    path = plot_demand_curve()
+                    image_path = plot_demand_curve()
+
                 return (
-                    f"✅ Gráfico de DEMANDA guardado en:\n{path}\n\n"
+                    f"✅ Gráfico de DEMANDA guardado en:\n{image_path}\n\n"
                     "📘 Explicación: La curva de demanda tiene pendiente negativa: "
                     "cuando el precio sube, la cantidad demandada baja (y viceversa)."
                 )
 
-            # Oferta sola
-            if pide_oferta and not pide_demanda:
+            # ----- Oferta sola
+            if wants_supply_graph and not wants_demand_graph:
                 # Parámetros opcionales: a_s, b_s
-                if len(nums) >= 2:
-                    path = plot_supply_curve(nums[0], nums[1])
+                if len(numeric_values) >= 2:
+                    image_path = plot_supply_curve(
+                        numeric_values[0],
+                        numeric_values[1],
+                    )
                 else:
-                    path = plot_supply_curve()
+                    image_path = plot_supply_curve()
+
                 return (
-                    f"✅ Gráfico de OFERTA guardado en:\n{path}\n\n"
+                    f"✅ Gráfico de OFERTA guardado en:\n{image_path}\n\n"
                     "📘 Explicación: La curva de oferta es creciente: "
                     "a precios más altos, los productores están dispuestos a ofrecer más cantidad."
                 )
 
-            # Ayuda si dijo “gráfico” pero no especificó tipo
+            # ----- Ayuda si dijo “gráfico” pero no especificó tipo
             return (
                 "Usos de `grafico`:\n"
                 "• `grafico demanda [a_d b_d]`\n"
@@ -167,41 +266,61 @@ def route_question(question: str, history=None) -> str:
                 "• `grafico serie 10,12,11,15`"
             )
 
-        except Exception as e:
-            return f"⚠️ No pude generar el gráfico: {e}"
+        except Exception as exc:
+            return f"⚠️ No pude generar el gráfico: {exc}"
 
     # ======================
     #  KB (definición + intuición + mini-check)
     # ======================
-    kb = answer_from_kb(q_raw) or answer_from_kb(q)
-    if not kb:
-        # búsqueda rápida por palabra clave si no hubo match
-        for key in ("demanda","oferta","elasticidad","pbi","pib","inflacion","is-lm","tir","vpn","costos","costo"):
-            if key in q:
-                kb = answer_from_kb(key)
-                if kb:
+    kb_entry = answer_from_kb(raw_question) or answer_from_kb(normalized_question)
+
+    if not kb_entry:
+        # búsqueda rápida por palabra clave si no hubo match directo
+        for keyword in (
+            "demanda",
+            "oferta",
+            "elasticidad",
+            "pbi",
+            "pib",
+            "inflacion",
+            "is-lm",
+            "tir",
+            "vpn",
+            "costos",
+            "costo",
+        ):
+            if keyword in normalized_question:
+                kb_entry = answer_from_kb(keyword)
+                if kb_entry:
                     break
 
-    if kb:
+    if kb_entry:
         try:
-            return _format_kb(kb)
-        except Exception as e:
-            # nunca romper por formato de KB
-            return f"• Definición: {str(kb)}\n• Mini-check: ¿Querés que lo bajemos a un numerito rápido?\n(Nota técnica: {e})"
+            return _format_kb_entry(kb_entry)
+        except Exception as exc:
+            # Nunca romper por un problema de formato de KB
+            return (
+                f"• Definición: {str(kb_entry)}\n"
+                "• Mini-check: ¿Querés que lo bajemos a un numerito rápido?\n"
+                f"(Nota técnica: {exc})"
+            )
 
     # ======================
     #  LLM (fallback)
     # ======================
     try:
-        msgs = build_messages(q_raw, history=history)
-        return chat_teacher(msgs, temperature=0.55, max_tokens=380)
-    except Exception as e:
-        # red de seguridad para consola
+        messages = build_messages(raw_question, history=history)
+        return chat_teacher(
+            messages,
+            temperature=DEFAULT_LLM_TEMPERATURE,
+            max_tokens=DEFAULT_LLM_MAX_TOKENS,
+        )
+    except Exception as exc:
+        # Red de seguridad para consola
         return (
             "⚠️ No pude consultar al modelo ahora.\n"
             "• Definición: La demanda es la cantidad que los consumidores desean comprar a cada precio; "
             "la oferta, la cantidad que los productores desean vender.\n"
             "• Mini-check: ¿Querés que lo bajemos a un numerito rápido?\n"
-            f"(Detalle técnico: {e})")
-
-        
+            f"(Detalle técnico: {exc})"
+        )
